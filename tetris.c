@@ -1,11 +1,27 @@
-#define WIN32_LEAN_AND_MEAN
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <conio.h>
 #include <windows.h>
+
+HANDLE hStdout;
+DWORD outdwMode;
+
+#endif
+
+#ifdef __linux__
+#include <sys/time.h>
+#include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
+
+struct termios original_termios;
+#endif
 
 #define N 4
 #define BOARD_W 10
@@ -97,19 +113,24 @@ typedef struct Tetris {
   Shape_t shape;
   int shape_color;
   int append_shape;
+  int board_updated;
   int next_shape_index;
   int next_shape_color;
 } Tetris_t;
 
 Tetris_t game;
 
-HANDLE hStdout;
-DWORD outdwMode;
 struct timespec ctimespec, ptimespec;
 
 void exit_error(const char *msg) {
   fprintf(stderr, "Error: %s.\n", msg);
   exit(1);
+}
+
+void swapi(int *a, int *b) {
+  int temp = *a;
+  *a = *b;
+  *b = temp;
 }
 
 void swapc(char *a, char *b) {
@@ -232,11 +253,13 @@ void update_board() {
     } else {
       game.running = 0;
     }
+    game.board_updated = 1;
   }
   if (get_interval(&ptimespec, &ctimespec) >= game.interval) {
     memcpy(&ptimespec, &ctimespec, sizeof(struct timespec));
     if (!move_shape_collides(&game.shape, game.x, game.y + 1)) {
       game.y++;
+      game.board_updated = 1;
     } else {
       game.append_shape = 1;
     }
@@ -256,10 +279,13 @@ void buffAppend(const char *s, int len) {
 #define RESET_CBUFF(buff) buff.len = 0;\
                           memset(buff.bits, 0, sizeof(buff.bits));
 
-void refresh_board() {
+void draw_board() {
+  if (!game.board_updated) {
+    return;
+  }
+  game.board_updated = 0;
   char c, buf[128], buf2[32];
   int color = 0, slen, midl, pad;
-  update_board();
   RESET_CBUFF(game.buff);
   buffAppend("\x1b[H\xc9", 4);
   memset(buf, '\xcd', 20);
@@ -379,18 +405,48 @@ void reset_game() {
   game.interval = 1000;
   game.buff.len = 0;
   game.append_shape = 0;
+  game.board_updated = 1;
   game.next_shape_index = get_random_shape_index();
   game.next_shape_color = get_random_color();
   memset(game.board, 0, BOARD_H * BOARD_W);
   update_shape();
 }
 
+int kbhitfix() {
+
+  #ifdef _WIN32
+  return _kbhit();
+  #endif
+
+  #ifdef __linux__
+  int ofcntl = fcntl(STDIN_FILENO, F_GETFL, 0);
+  fcntl(STDIN_FILENO, F_SETFL, ofcntl | O_NONBLOCK);
+  int ch = getchar();
+  fcntl(STDIN_FILENO, F_SETFL, ofcntl);
+  if (ch != EOF) {
+    ungetc(ch, stdin);
+    return 1;
+  }
+  return 0;
+  #endif
+}
+
+int getchfix() {
+
+  #ifdef _WIN32
+  return _getch();
+  #endif
+
+  #ifdef __linux__
+  return getchar();
+  #endif
+}
+
 void handle_input() {
   int c;
-
   if (!game.running) {
     while (1) {
-      c = _getch();
+      c = getchfix();
       if (c == 'y') {
         reset_game();
         return;
@@ -400,33 +456,37 @@ void handle_input() {
     }
   }
 
-  if (!_kbhit()) {
+  if (!kbhitfix()) {
     return;
   }
-  c = _getch();
+  c = getchfix();
   if (c == 224) {
-    c = _getch();
+    c = getchfix();
     switch (c) {
-      case 72:
+      case 72: // UP ARROW 
         rotate_shape();
+        game.board_updated = 1;
         break;
-      case 75:
+      case 75: // LEFT ARROW
         if (!move_shape_collides(&game.shape, game.x - 1, game.y)) {
           game.x--;
+          game.board_updated = 1;
         } 
         break;
-      case 77:
+      case 77: // RIGHT ARROW
         if (!move_shape_collides(&game.shape, game.x + 1, game.y)) {
           game.x++;
+          game.board_updated = 1;
         }
         break;
       case 80:
         if (!move_shape_collides(&game.shape, game.x, game.y + 1)) {
           game.y++;
+          game.board_updated = 1;
         } else {
           game.append_shape = 1;
         }
-        break;
+        break; // DOWN ARROW
     }
   } else {
     switch (c) {
@@ -438,17 +498,26 @@ void handle_input() {
 }
 
 void exit_console(void) {
+  #ifdef _WIN32
   if (hStdout != INVALID_HANDLE_VALUE && outdwMode) {
     printf("\x1b[!p");
     printf("\x1b[?25h");
     printf("\x1b[?1049l");
     SetConsoleMode(hStdout, outdwMode);
   }
+  #endif
+
+  #ifdef __linux__
+  tcsetattr(STDIN_FILENO, TCSANOW, &original_termios);
+  #endif
 }
 
 void init_console() {
-  DWORD dwMode;
+  
   atexit(exit_console);
+
+  #ifdef _WIN32
+  DWORD dwMode;
   hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
 
   if (hStdout == INVALID_HANDLE_VALUE) {
@@ -466,6 +535,15 @@ void init_console() {
   if (!SetConsoleMode(hStdout, dwMode)) {
     exit_error("Can't set stdout handle mode");
   }
+  #endif
+
+  #ifdef __linux__
+  struct termios new_termios;
+  tcgetattr(STDIN_FILENO, &original_termios);
+  new_termios = original_termios;
+  new_termios.c_lflag &= ~(ECHO | ICANON);
+  tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
+  #endif
   
   printf("\x1b[?1049h");
   printf("\x1b]0;%s\x07", "Tetris in console");
@@ -483,7 +561,7 @@ void game_intro() {
          "   | |/ -_)  _| '_| (_-<\r\n"
          "   |_|\\___|\\__|_| |_/__/\r\n\r\n");
   printf("Press any key to continue...");
-  _getch();
+  getchfix();
 }
 
 int main() {
@@ -493,7 +571,8 @@ int main() {
 
   while (1) {
     handle_input();
-    refresh_board();
+    update_board();
+    draw_board();
   }
 
   return 0;
