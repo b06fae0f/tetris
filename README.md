@@ -1,2 +1,2 @@
 # Tetris in console
-Works for Windows only at the moment.
+It works fine for Windows but has not yet been tested for Linux.
