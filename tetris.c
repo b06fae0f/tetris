@@ -97,7 +97,7 @@ const Shape_t shapes[] = {
 const int number_of_shapes = sizeof(shapes) / sizeof(Shape_t);
 
 typedef struct CBuff {
-  char bits[MAXBUFF];
+  unsigned char bits[MAXBUFF];
   int len;
 } CBuff_t;
 
@@ -331,7 +331,7 @@ void draw_board() {
     if (i == 1) {
       buffAppend("       SCORE:       ", 20);
     } else if (i == 2) {
-      slen = snprintf(buf2, sizeof(buf2), "%ld", game.score);
+      slen = snprintf(buf2, sizeof(buf2), "%d", game.score);
       midl = (20 - slen) / 2;
       pad = midl + (slen % 2);
       memset(buf, ' ', pad);
@@ -343,7 +343,7 @@ void draw_board() {
     } else if (i == 4) {
       buffAppend("       LEVEL:       ", 20);
     } else if (i == 5) {
-      slen = snprintf(buf2, sizeof(buf2), "%ld", game.level);
+      slen = snprintf(buf2, sizeof(buf2), "%d", game.level);
       midl = (20 - slen) / 2;
       pad = midl + (slen % 2);
       memset(buf, ' ', pad);
