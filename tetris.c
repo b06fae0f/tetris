@@ -9,8 +9,8 @@
 #include <conio.h>
 #include <windows.h>
 
-HANDLE hStdout;
-DWORD outdwMode;
+HANDLE hStdout, hStdin;
+DWORD outdwMode, indwMode;
 
 #endif
 
@@ -20,6 +20,7 @@ DWORD outdwMode;
 #include <termios.h>
 #include <fcntl.h>
 
+int original_fcntl;
 struct termios original_termios;
 #endif
 
@@ -125,12 +126,6 @@ struct timespec ctimespec, ptimespec;
 void exit_error(const char *msg) {
   fprintf(stderr, "Error: %s.\n", msg);
   exit(1);
-}
-
-void swapi(int *a, int *b) {
-  int temp = *a;
-  *a = *b;
-  *b = temp;
 }
 
 void swapc(char *a, char *b) {
@@ -383,6 +378,7 @@ void draw_board() {
   memset(buf, '\xcd', 20);
   buffAppend(buf, 20);
   buffAppend("\xbc\r\n", 3);
+  buffAppend("\x1b[97mCTRL-Q = Quit\x1b[0m\r\n", 23);
   if (!game.running) {
     slen = snprintf(
       buf, 
@@ -412,28 +408,11 @@ void reset_game() {
   update_shape();
 }
 
-int kbhitfix() {
-
+int nonblockgetch() {
   #ifdef _WIN32
-  return _kbhit();
-  #endif
-
-  #ifdef __linux__
-  int ofcntl = fcntl(STDIN_FILENO, F_GETFL, 0);
-  fcntl(STDIN_FILENO, F_SETFL, ofcntl | O_NONBLOCK);
-  int ch = getchar();
-  fcntl(STDIN_FILENO, F_SETFL, ofcntl);
-  if (ch != EOF) {
-    ungetc(ch, stdin);
-    return 1;
+  if (!_kbhit()) {
+    return EOF;
   }
-  return 0;
-  #endif
-}
-
-int getchfix() {
-
-  #ifdef _WIN32
   return _getch();
   #endif
 
@@ -446,7 +425,7 @@ void handle_input() {
   int c;
   if (!game.running) {
     while (1) {
-      c = getchfix();
+      while ((c = getchar()) == EOF);   
       if (c == 'y') {
         reset_game();
         return;
@@ -456,41 +435,43 @@ void handle_input() {
     }
   }
 
-  if (!kbhitfix()) {
-    return;
-  }
-  c = getchfix();
-  if (c == 224) {
-    c = getchfix();
-    switch (c) {
-      case 72: // UP ARROW 
-        rotate_shape();
-        game.board_updated = 1;
-        break;
-      case 75: // LEFT ARROW
-        if (!move_shape_collides(&game.shape, game.x - 1, game.y)) {
-          game.x--;
+  if ((c = nonblockgetch()) == EOF) return;
+
+  if (c == '\x1b') {
+    if ((c = nonblockgetch()) == EOF) return;
+    if (c == '[') {
+      if ((c = nonblockgetch()) == EOF) return;
+      switch (c) {
+        case 'A': // UP ARROW 
+          rotate_shape();
           game.board_updated = 1;
-        } 
-        break;
-      case 77: // RIGHT ARROW
-        if (!move_shape_collides(&game.shape, game.x + 1, game.y)) {
-          game.x++;
-          game.board_updated = 1;
-        }
-        break;
-      case 80:
-        if (!move_shape_collides(&game.shape, game.x, game.y + 1)) {
-          game.y++;
-          game.board_updated = 1;
-        } else {
-          game.append_shape = 1;
-        }
-        break; // DOWN ARROW
+          break;
+        case 'D': // LEFT ARROW
+          if (!move_shape_collides(&game.shape, game.x - 1, game.y)) {
+            game.x--;
+            game.board_updated = 1;
+          } 
+          break;
+        case 'C': // RIGHT ARROW
+          if (!move_shape_collides(&game.shape, game.x + 1, game.y)) {
+            game.x++;
+            game.board_updated = 1;
+          }
+          break;
+        case 'B': // DOWN ARROW
+          if (!move_shape_collides(&game.shape, game.x, game.y + 1)) {
+            game.y++;
+            game.board_updated = 1;
+          } else {
+            game.append_shape = 1;
+          }
+          break;
+      }
     }
   } else {
     switch (c) {
-      case 27: 
+      case 3: // CTRL + C
+      case 17: // CTRL + Q
         exit(0); 
         break;
     }
@@ -498,17 +479,23 @@ void handle_input() {
 }
 
 void exit_console(void) {
+
+  printf("\x1b[!p");
+  printf("\x1b[?25h");
+  printf("\x1b[?1049l");
+
   #ifdef _WIN32
   if (hStdout != INVALID_HANDLE_VALUE && outdwMode) {
-    printf("\x1b[!p");
-    printf("\x1b[?25h");
-    printf("\x1b[?1049l");
     SetConsoleMode(hStdout, outdwMode);
+  }
+  if (hStdin != INVALID_HANDLE_VALUE && indwMode) {
+    SetConsoleMode(hStdin, indwMode);
   }
   #endif
 
   #ifdef __linux__
   tcsetattr(STDIN_FILENO, TCSANOW, &original_termios);
+  fcntl(STDIN_FILENO, F_SETFL, original_fcntl);
   #endif
 }
 
@@ -518,6 +505,7 @@ void init_console() {
 
   #ifdef _WIN32
   DWORD dwMode;
+
   hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
 
   if (hStdout == INVALID_HANDLE_VALUE) {
@@ -527,7 +515,6 @@ void init_console() {
     exit_error("Can't get stdout handle mode");
   }
 
-
   dwMode = outdwMode;
   dwMode |= ENABLE_PROCESSED_OUTPUT;
   dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
@@ -535,14 +522,37 @@ void init_console() {
   if (!SetConsoleMode(hStdout, dwMode)) {
     exit_error("Can't set stdout handle mode");
   }
+
+  hStdin = GetStdHandle(STD_INPUT_HANDLE);
+
+  if (hStdin == INVALID_HANDLE_VALUE) {
+    exit_error("Invalid stdin handle value");
+  }
+  if (!GetConsoleMode(hStdin, &indwMode)) {
+    exit_error("Can't get stdin handle mode");
+  }
+
+  dwMode = indwMode;
+  dwMode &= ~ENABLE_ECHO_INPUT;
+  dwMode &= ~ENABLE_LINE_INPUT;
+  dwMode &= ~ENABLE_PROCESSED_INPUT;
+  dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+  if (!SetConsoleMode(hStdin, dwMode)) {
+    exit_error("Can't set stdin handle mode");
+  }
   #endif
 
   #ifdef __linux__
   struct termios new_termios;
   tcgetattr(STDIN_FILENO, &original_termios);
   new_termios = original_termios;
-  new_termios.c_lflag &= ~(ECHO | ICANON);
+  new_termios.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  new_termios.c_cc[VMIN] = 0;
+  new_termios.c_cc[VTIME] = 1;
   tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
+  original_fcntl = fcntl(STDIN_FILENO, F_GETFL, 0);
+  fcntl(STDIN_FILENO, F_SETFL, original_fcntl | O_NONBLOCK);
   #endif
   
   printf("\x1b[?1049h");
@@ -561,7 +571,7 @@ void game_intro() {
          "   | |/ -_)  _| '_| (_-<\r\n"
          "   |_|\\___|\\__|_| |_/__/\r\n\r\n");
   printf("Press any key to continue...");
-  getchfix();
+  while (nonblockgetch() == EOF);
 }
 
 int main() {
